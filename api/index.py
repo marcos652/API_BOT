@@ -1,16 +1,54 @@
 import asyncio
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import json
 import base64
 import time
 import os
+import secrets
 from datetime import datetime
 import google.generativeai as genai
 
-app = FastAPI(title="API Demandas Jira - Vercel")
+app = FastAPI(title="API Demandas Jira - Vercel", docs_url=None, redoc_url=None)
+
+# === CORS — Apenas o dashboard pode acessar ===
+ALLOWED_ORIGINS = [
+    "https://repositoriobotjiraupdate.vercel.app",
+    "http://localhost:3000",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# === Security Headers Middleware ===
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    return response
+
+# === API Key Auth ===
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "jiraops-api-key-2024-secure")
+
+def verify_api_key(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token de autenticação obrigatório")
+    token = auth_header[7:]
+    if not secrets.compare_digest(token, API_SECRET_KEY):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    return True
 
 # === Credenciais (Usando Vari├íveis de Ambiente para Seguran├ºa no GitHub/Vercel) ===
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -119,7 +157,7 @@ def generate_issue_data(extracted_text, sup_ref, downloaded_files, client_name_s
         return None
 
 @app.post("/api/criar-demanda")
-async def criar_demanda_api(demanda: DemandaInput):
+async def criar_demanda_api(demanda: DemandaInput, authorized: bool = Depends(verify_api_key)):
     """
     Endpoint S├¡ncrono (aguarda) otimizado para o Serverless da Vercel.
     Processa a imagem, bate no Gemini, cria o Jira, aguarda 4s, faz o PUT da descri├º├úo e avisa no Slack,
@@ -194,7 +232,24 @@ async def criar_demanda_api(demanda: DemandaInput):
                     "client_id_mapped": client_id
                 }
             else:
-                raise HTTPException(status_code=c_res.status_code, detail=c_res.text)
+                raise HTTPException(status_code=c_res.status_code, detail="Erro ao criar issue no Jira")
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Erro interno: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno do servidor")
+
+@app.get("/api/issue/{issue_key}")
+async def get_issue(issue_key: str, authorized: bool = Depends(verify_api_key)):
+    """Consulta uma issue do Jira pelo key."""
+    if not JIRA_TOKEN:
+        raise HTTPException(status_code=500, detail="Servidor mal configurado")
+    async with httpx.AsyncClient() as client:
+        res = await client.get(
+            f"https://movingpay.atlassian.net/rest/api/3/issue/{issue_key}",
+            headers=jira_headers
+        )
+        if res.status_code == 200:
+            return res.json()
+        raise HTTPException(status_code=res.status_code, detail="Issue não encontrada")
