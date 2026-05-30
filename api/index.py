@@ -156,6 +156,11 @@ def generate_issue_data(extracted_text, sup_ref, downloaded_files, client_name_s
         print(f"Erro IA: {e}")
         return None
 
+@app.get("/api/criar-demanda")
+async def criar_demanda_get(authorized: bool = Depends(verify_api_key)):
+    """GET not allowed — requires POST."""
+    raise HTTPException(status_code=405, detail="Use POST")
+
 @app.post("/api/criar-demanda")
 async def criar_demanda_api(demanda: DemandaInput, authorized: bool = Depends(verify_api_key)):
     """
